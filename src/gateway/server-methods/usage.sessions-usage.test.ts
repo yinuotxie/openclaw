@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import { withEnvAsync } from "../../test-utils/env.js";
 
 vi.mock("../../config/config.js", () => {
@@ -142,6 +143,77 @@ function expectSuccessfulSessionsUsage(
   return result.sessions;
 }
 
+const CHANNEL_ATTRIBUTION_CASES = [
+  {
+    name: "attributes DM webchat sessions to webchat when only origin.provider is set",
+    storeEntry: {
+      sessionId: "s-main",
+      label: "Webchat DM",
+      updatedAt: 300,
+      origin: {
+        provider: "webchat",
+        chatType: "direct",
+      },
+    },
+    expectedChannel: "webchat",
+  },
+  {
+    name: "attributes DM telegram sessions to telegram when only origin.provider is set",
+    storeEntry: {
+      sessionId: "s-main",
+      label: "Telegram DM",
+      updatedAt: 300,
+      origin: {
+        provider: "telegram",
+        chatType: "direct",
+      },
+    },
+    expectedChannel: "telegram",
+  },
+  {
+    name: "attributes group telegram sessions to telegram",
+    storeEntry: {
+      sessionId: "s-main",
+      label: "Telegram Group",
+      updatedAt: 300,
+      channel: "telegram",
+      origin: {
+        provider: "telegram",
+        chatType: "group",
+      },
+    },
+    expectedChannel: "telegram",
+  },
+  {
+    name: "prefers origin.provider over storeEntry.channel when they differ",
+    storeEntry: {
+      sessionId: "s-main",
+      label: "Telegram origin via webchat delivery",
+      updatedAt: 300,
+      channel: "webchat",
+      origin: {
+        provider: "telegram",
+        chatType: "direct",
+      },
+    },
+    expectedChannel: "telegram",
+  },
+  {
+    name: "falls back to storeEntry.channel when origin is missing",
+    storeEntry: {
+      sessionId: "s-main",
+      label: "Legacy channel fallback",
+      updatedAt: 300,
+      channel: "slack",
+    },
+    expectedChannel: "slack",
+  },
+] satisfies Array<{
+  name: string;
+  storeEntry: SessionEntry;
+  expectedChannel: string;
+}>;
+
 describe("sessions.usage", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -255,6 +327,43 @@ describe("sessions.usage", () => {
     // webchat and telegram attribution for sessions whose origin.provider differs.
     expect(totalsByChannel.get("webchat")).toBe(111);
     expect(totalsByChannel.get("telegram")).toBe(222);
+  });
+
+  it.each(CHANNEL_ATTRIBUTION_CASES)("$name", async ({ storeEntry, expectedChannel }) => {
+    const attributedTokens = 321;
+    vi.mocked(loadCombinedSessionStoreForGateway).mockReturnValue({
+      storePath: "(multiple)",
+      store: {
+        "named:channel-attribution": storeEntry,
+      },
+    });
+    vi.mocked(loadSessionCostSummary).mockImplementation(async (params) => {
+      if (params?.sessionId === storeEntry.sessionId) {
+        return buildSessionUsage(attributedTokens);
+      }
+      return buildSessionUsage(0);
+    });
+
+    const respond = await runSessionsUsage(BASE_USAGE_RANGE);
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(respond.mock.calls[0]?.[0]).toBe(true);
+    const result = respond.mock.calls[0]?.[1] as {
+      sessions: Array<{ key: string; channel?: string }>;
+      aggregates: {
+        byChannel: Array<{ channel: string; totals: { totalTokens: number } }>;
+      };
+    };
+
+    const attributedSession = result.sessions.find(
+      (session) => session.key === "named:channel-attribution",
+    );
+    expect(attributedSession?.channel).toBe(expectedChannel);
+
+    const totalsByChannel = new Map(
+      result.aggregates.byChannel.map((entry) => [entry.channel, entry.totals.totalTokens]),
+    );
+    expect(totalsByChannel.get(expectedChannel)).toBe(attributedTokens);
+    expect(totalsByChannel.size).toBe(1);
   });
 
   it("rejects traversal-style keys in specific session usage lookups", async () => {
