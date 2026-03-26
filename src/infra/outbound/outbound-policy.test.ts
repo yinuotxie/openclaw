@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 
+let applyCrossContextDecoration: typeof import("./outbound-policy.js").applyCrossContextDecoration;
+let buildCrossContextDecoration: typeof import("./outbound-policy.js").buildCrossContextDecoration;
+let enforceCrossContextPolicy: typeof import("./outbound-policy.js").enforceCrossContextPolicy;
+let shouldApplyCrossContextMarker: typeof import("./outbound-policy.js").shouldApplyCrossContextMarker;
+
 class TestDiscordUiContainer extends Container {}
 
 const mocks = vi.hoisted(() => ({
@@ -47,19 +52,6 @@ const mocks = vi.hoisted(() => ({
   ),
 }));
 
-vi.mock("./channel-adapters.js", () => ({
-  getChannelMessageAdapter: mocks.getChannelMessageAdapter,
-}));
-
-vi.mock("./target-normalization.js", () => ({
-  normalizeTargetForProvider: mocks.normalizeTargetForProvider,
-}));
-
-vi.mock("./target-resolver.js", () => ({
-  formatTargetDisplay: mocks.formatTargetDisplay,
-  lookupDirectoryDisplay: mocks.lookupDirectoryDisplay,
-}));
-
 const slackConfig = {
   channels: {
     slack: {
@@ -75,15 +67,20 @@ const discordConfig = {
   },
 } as OpenClawConfig;
 
-let applyCrossContextDecoration: typeof import("./outbound-policy.js").applyCrossContextDecoration;
-let buildCrossContextDecoration: typeof import("./outbound-policy.js").buildCrossContextDecoration;
-let enforceCrossContextPolicy: typeof import("./outbound-policy.js").enforceCrossContextPolicy;
-let shouldApplyCrossContextMarker: typeof import("./outbound-policy.js").shouldApplyCrossContextMarker;
-
 describe("outbound policy helpers", () => {
   beforeEach(async () => {
-    vi.clearAllMocks();
     vi.resetModules();
+    vi.clearAllMocks();
+    vi.doMock("./channel-adapters.js", () => ({
+      getChannelMessageAdapter: mocks.getChannelMessageAdapter,
+    }));
+    vi.doMock("./target-normalization.js", () => ({
+      normalizeTargetForProvider: mocks.normalizeTargetForProvider,
+    }));
+    vi.doMock("./target-resolver.js", () => ({
+      formatTargetDisplay: mocks.formatTargetDisplay,
+      lookupDirectoryDisplay: mocks.lookupDirectoryDisplay,
+    }));
     ({
       applyCrossContextDecoration,
       buildCrossContextDecoration,
@@ -142,6 +139,25 @@ describe("outbound policy helpers", () => {
     ).toThrow(/target="C999" while bound to "C123"/);
   });
 
+  it("blocks same-provider cross-context uploads when allowWithinProvider is false", () => {
+    const cfg = {
+      ...slackConfig,
+      tools: {
+        message: { crossContext: { allowWithinProvider: false } },
+      },
+    } as OpenClawConfig;
+
+    expect(() =>
+      enforceCrossContextPolicy({
+        cfg,
+        channel: "slack",
+        action: "upload-file",
+        args: { to: "C999" },
+        toolContext: { currentChannelId: "C123", currentChannelProvider: "slack" },
+      }),
+    ).toThrow(/target="C999" while bound to "C123"/);
+  });
+
   it("uses components when available and preferred", async () => {
     const decoration = await buildCrossContextDecoration({
       cfg: discordConfig,
@@ -190,6 +206,7 @@ describe("outbound policy helpers", () => {
 
   it("marks only supported cross-context actions", () => {
     expect(shouldApplyCrossContextMarker("send")).toBe(true);
+    expect(shouldApplyCrossContextMarker("upload-file")).toBe(true);
     expect(shouldApplyCrossContextMarker("thread-reply")).toBe(true);
     expect(shouldApplyCrossContextMarker("thread-create")).toBe(false);
   });
